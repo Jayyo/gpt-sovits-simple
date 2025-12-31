@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Audio files (may contain personal voice data)
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+
+# Output
+output/
+logs/
+
+# Models (too large for git)
+*.ckpt
+*.pth
+*.pt
+*.bin
+*.safetensors
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
