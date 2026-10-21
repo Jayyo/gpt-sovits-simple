@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gpt-sovits-simple"
+version = "0.2.0"
+description = "Command line and Python wrapper for GPT-SoVITS text-to-speech"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+# torch, torchaudio and the rest come from the GPT-SoVITS environment this is installed into
+dependencies = ["soundfile>=0.12"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+gpt-sovits-simple = "simple_tts:main"
+
+[project.urls]
+Source = "https://github.com/Jayyo/gpt-sovits-simple"
+
+[tool.setuptools]
+py-modules = ["simple_tts"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

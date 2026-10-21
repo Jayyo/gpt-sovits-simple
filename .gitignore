@@ -40,3 +40,6 @@ Thumbs.db
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Tests
+.pytest_cache/

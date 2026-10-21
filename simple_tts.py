@@ -5,7 +5,7 @@ Clones the voice of a 3-10 second reference clip using GPT-SoVITS's own
 inference code (GPT_SoVITS/TTS_infer_pack). This file only adds a command
 line, input checks and a small Python API on top.
 
-    python simple_tts.py "Hello there." hello.wav -r ref.wav -t "Words spoken in ref.wav"
+    gpt-sovits-simple "Hello there." -r ref.wav -t "Words spoken in ref.wav" -o hello.wav
 """
 import argparse
 import contextlib
@@ -443,51 +443,176 @@ def batch_generate(texts, output_dir="output", prefix="tts", **kwargs):
     return get_tts().batch_generate(texts, output_dir, prefix, **kwargs)
 
 
-def main():
+# ---------------------------------------------------------------- command line
+
+def _number(kind, low, high, low_inclusive=True):
+    def parse(value):
+        try:
+            number = kind(value)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"{value!r} is not a number")
+        too_low = number < low if low_inclusive else number <= low
+        if not math.isfinite(number) or too_low or number > high:
+            bracket = "[" if low_inclusive else "("
+            raise argparse.ArgumentTypeError(f"{value} is outside {bracket}{low}, {high}]")
+        return number
+    return parse
+
+
+def build_parser():
     parser = argparse.ArgumentParser(
-        description="Simple TTS for GPT-SoVITS",
+        prog="gpt-sovits-simple",
+        description="Text-to-speech with an existing GPT-SoVITS checkout, in the voice of a 3-10 second reference clip.",
+        epilog=(
+            "examples:\n"
+            '  gpt-sovits-simple "Hello there." -r ref.wav -t "Words spoken in ref.wav" -o hello.wav\n'
+            '  gpt-sovits-simple -f script.txt -r ref.wav -t "참조 음성 문장" -l ko -o out.wav\n'
+            "  gpt-sovits-simple --check --gpt-sovits-dir ~/GPT-SoVITS"
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-    python simple_tts.py "Hello world"
-    python simple_tts.py "Hello world" output.wav
-    python simple_tts.py "Hello world" -r ref.wav -t "Reference text"
-    python simple_tts.py "Hello world" --language en --speed 1.2
-        """
     )
+    parser.add_argument("text", nargs="?", help="text to speak (or use --text-file)")
+    parser.add_argument("legacy_output", nargs="?", metavar="output", help=argparse.SUPPRESS)
+    parser.add_argument("-o", "--output", help=f"audio file to write: .wav, .flac or .ogg (default: {DEFAULT_OUTPUT})")
+    parser.add_argument("-f", "--text-file", help="read the text from a UTF-8 file instead")
+    parser.add_argument("-r", "--ref-audio", help="reference clip, 3-10 seconds; WAV works best")
+    parser.add_argument("-t", "--ref-text", help="what is said in the reference clip (optional for v1/v2, but much better)")
+    parser.add_argument("-l", "--language", choices=LANGUAGES, default="auto", metavar="LANG",
+                        help="language of the text: auto, en, ko, ja, zh, yue, or all_ko / all_ja / all_zh / "
+                             "all_yue / auto_yue (default: auto)")
+    parser.add_argument("--ref-language", choices=LANGUAGES, metavar="LANG",
+                        help="language of the reference text (default: same as --language)")
+    parser.add_argument("-s", "--speed", type=_number(float, 0.5, 2.0), default=1.0, help="0.5-2.0 (default: 1.0)")
+    parser.add_argument("--top-k", type=_number(int, 1, 100), default=15, help="default: 15")
+    parser.add_argument("--top-p", type=_number(float, 0, 1, low_inclusive=False), default=1.0, help="default: 1.0")
+    parser.add_argument("--temperature", type=_number(float, 0, 2, low_inclusive=False), default=1.0,
+                        help="default: 1.0")
+    parser.add_argument("--seed", type=_number(int, -1, 2**32 - 1), default=-1,
+                        help="random seed, -1 for random (default)")
+    parser.add_argument("--text-split-method", choices=SPLIT_METHODS, default="cut1",
+                        help="how long text is split: cut0 none, cut1 every 4 sentences (default), cut2 every 50 "
+                             "characters, cut3 at 。, cut4 at '.', cut5 at any punctuation")
+    parser.add_argument("--gpt-model", help="GPT (s1) checkpoint (default: pretrained model for --model-version)")
+    parser.add_argument("--sovits-model", help="SoVITS (s2) checkpoint (default: pretrained model for --model-version)")
+    parser.add_argument("--model-version", choices=list(DEFAULT_MODELS), default="v2",
+                        help="which pretrained defaults to use (default: v2)")
+    parser.add_argument("--gpt-sovits-dir",
+                        help="GPT-SoVITS checkout (default: $GPT_SOVITS_DIR, the current directory, "
+                             "or the directory of this script)")
+    parser.add_argument("--device", default="auto", help="auto, cpu, cuda or cuda:N (default: auto)")
+    parser.add_argument("--cpu", dest="device", action="store_const", const="cpu", help=argparse.SUPPRESS)
+    parser.add_argument("--fp32", action="store_true", help="full precision on GPU (more memory, rarely needed)")
+    parser.add_argument("--check", action="store_true", help="check the setup and exit without generating")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    return parser
 
-    parser.add_argument("text", help="Text to synthesize")
-    parser.add_argument("output", nargs="?", default=None, help="Output wav file path")
-    parser.add_argument("-r", "--ref-audio", help="Reference audio file")
-    parser.add_argument("-t", "--ref-text", help="Reference audio text content")
-    parser.add_argument("-l", "--language", default="auto", help="Language (ko, en, zh, ja, auto)")
-    parser.add_argument("-s", "--speed", type=float, default=1.0, help="Speed factor (default: 1.0)")
-    parser.add_argument("--gpt-model", help="Path to GPT model")
-    parser.add_argument("--sovits-model", help="Path to SoVITS model")
-    parser.add_argument("--cpu", action="store_true", help="Use CPU instead of GPU")
 
-    args = parser.parse_args()
+def run_check(args):
+    """Print what is set up and what is missing. Returns an exit code."""
+    problems = 0
 
-    if not args.ref_audio or not args.ref_text:
-        print("Error: Reference audio (-r) and reference text (-t) are required.")
-        print("Example: python simple_tts.py \"Hello\" -r reference.wav -t \"Reference text\"")
-        sys.exit(1)
+    def line(label, ok, detail):
+        nonlocal problems
+        problems += not ok
+        print(f"{'ok  ' if ok else 'FAIL'}  {label:<18} {detail}")
 
-    tts = SimpleTTS(
-        gpt_model=args.gpt_model,
-        sovits_model=args.sovits_model,
-        ref_audio=args.ref_audio,
-        ref_text=args.ref_text,
-        device="cpu" if args.cpu else "auto",
-    )
+    try:
+        root = find_gpt_sovits_dir(args.gpt_sovits_dir)
+    except SetupError as e:
+        line("GPT-SoVITS", False, str(e))
+        return 1
+    line("GPT-SoVITS", True, str(root))
 
-    tts.generate(
-        text=args.text,
-        output_path=args.output,
-        language=args.language,
-        speed=args.speed,
-    )
+    try:
+        import torch
+        import torchaudio
+        line("PyTorch", True, f"torch {torch.__version__}, torchaudio {torchaudio.__version__}")
+    except Exception as e:  # ImportError, or OSError from a broken CUDA install
+        line("PyTorch", False, f"{e} (use the GPT-SoVITS Python environment)")
+    else:
+        try:
+            device = _pick_device(args.device)
+            name = torch.cuda.get_device_name(torch.device(device)) if device.startswith("cuda") else "CPU"
+            line("device", True, f"{device} ({name})")
+        except SetupError as e:
+            line("device", False, str(e))
+        try:
+            with _inside(root):
+                import TTS_infer_pack.TTS  # noqa: F401
+            line("GPT-SoVITS import", True, "TTS_infer_pack.TTS imports")
+        except Exception as e:
+            line("GPT-SoVITS import", False, f"{type(e).__name__}: {e}")
+
+    tts = SimpleTTS(args.gpt_model, args.sovits_model, model_version=args.model_version, gpt_sovits_dir=root)
+    missing = tts.missing_models()
+    for path in (tts.gpt_model, tts.sovits_model, *(str(root / p) for p in SHARED_MODELS)):
+        line("model files", path not in missing, path)
+    if args.model_version not in ("v1", "v2"):
+        print(f"note  {args.model_version} also needs extra pretrained files that this check does not cover")
+
+    if args.ref_audio:
+        try:
+            line("reference clip", True, f"{args.ref_audio} ({check_reference(args.ref_audio):.1f} s)")
+        except SetupError as e:
+            line("reference clip", False, str(e))
+    return 1 if problems else 0
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.check:
+        try:
+            return run_check(args)
+        except Exception as e:
+            print(f"error: check failed: {type(e).__name__}: {e}", file=sys.stderr)
+            return 1
+
+    if bool(args.text) == bool(args.text_file):
+        parser.error("give the text either as an argument or with --text-file")
+    if args.output and args.legacy_output:
+        parser.error("give the output path once (-o)")
+    if args.text_file and args.legacy_output:
+        parser.error("with --text-file, use -o for the output path")
+    if not args.ref_audio:
+        parser.error("a reference clip is required (-r ref.wav)")
+
+    try:
+        if args.text_file:
+            text = Path(args.text_file).read_text(encoding="utf-8")
+        else:
+            text = args.text
+        tts = SimpleTTS(
+            gpt_model=args.gpt_model,
+            sovits_model=args.sovits_model,
+            ref_audio=args.ref_audio,
+            ref_text=args.ref_text,
+            device=args.device,
+            is_half=not args.fp32,
+            model_version=args.model_version,
+            gpt_sovits_dir=args.gpt_sovits_dir,
+        )
+        path = tts.generate(
+            text,
+            args.output or args.legacy_output,
+            language=args.language,
+            ref_language=args.ref_language,
+            speed=args.speed,
+            top_k=args.top_k,
+            top_p=args.top_p,
+            temperature=args.temperature,
+            seed=args.seed,
+            text_split_method=args.text_split_method,
+        )
+    except (SetupError, ValueError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    except Exception as e:
+        print(f"error: generation failed: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
+    print(path)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
